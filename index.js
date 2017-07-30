@@ -1,26 +1,18 @@
-var q = require('./q');
-var qTuple = require('./qTuple');
-var getEntity = require('./getEntity');
-var Transactor = require('./transactor');
+import q from './q'
+import qTuple from './qTuple'
+import getEntity from './getEntity'
+import Transactor from './transactor'
 
-module.exports = function(db, options, onStartup){
-  if(arguments.length === 2){
-    onStartup = options;
-    options = {};
+export default function (db, options, onStartup) {
+  if (arguments.length === 2) {
+    onStartup = options
+    options = {}
   }
-  Transactor(db, options, function(err, transactor){
-    if(err) return onStartup(err);
-
-    onStartup(null, {
-      transact: transactor.transact,
-
-      connection: transactor.connection,
-      snap: transactor.connection.snap,
-      asOf: transactor.connection.asOf,
-
-      q: q,
-      qTuple: qTuple,
-      getEntity: getEntity
-    });
-  });
-};
+  Transactor(db, options, (err, transactor) => {
+    if (err) {
+      return onStartup(err)
+    }
+    const { connection, connection: { asOf, snap }, transact } = transactor
+    onStartup(null, { asOf, connection, getEntity, q, qTuple, snap, transact })
+  })
+}
