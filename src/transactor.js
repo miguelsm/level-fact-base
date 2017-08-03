@@ -1,43 +1,37 @@
 import _ from 'lodash'
-import contra from 'contra'
+import PQueue from 'p-queue'
 import HashIndex from 'level-hash-index'
-import AsyncQ from './any-value-async-q'
 import Connection from './connection'
 import constants from './constants'
 import * as SchemaUtils from './schema-utils'
-import toPaddedBase36 from './utils/toPaddedBase36'
+import toPaddedBase36 from './utils/to-padded-base36'
 
-function tupleToDBOps (fb, txn, tuple, callback) {
-  contra.map(
-    [tuple[0], tuple[1], tuple[2]],
-    fb.hindex.put,
-    (err, hashDatas) => {
-      if (err) {
-        return callback(err)
-      }
-
-      const ops = []
-      const fact = {
-        t: toPaddedBase36(txn, 6), // for lexo-graphic sorting
-        o: tuple[3]
-      }
-      'eav'.split('').forEach((k, i) => {
-        fact[k] = hashDatas[i].hash
-        if (hashDatas[i].is_new) {
-          ops.push({ type: 'put', key: hashDatas[i].key, value: tuple[i] })
-        }
-      })
-
-      constants.indexNames.forEach(index => {
-        ops.push({
-          type: 'put',
-          key: index + '!' + index.split('').map(k => fact[k]).join('!'),
-          value: 0
-        })
-      })
-      callback(null, ops)
+async function tupleToDBOps (fb, txn, tuple) {
+  try {
+    const [e, a, v] = tuple
+    const hashDatas = await Promise.all([e, a, v].map(fb.hindex.put))
+    const ops = []
+    const fact = {
+      t: toPaddedBase36(txn, 6), // for lexo-graphic sorting
+      o: tuple[3]
     }
-  )
+    'eav'.split('').forEach((k, i) => {
+      fact[k] = hashDatas[i].hash
+      if (hashDatas[i].isNew) {
+        ops.push({ type: 'put', key: hashDatas[i].key, value: tuple[i] })
+      }
+    })
+    constants.indexNames.forEach(index => {
+      ops.push({
+        type: 'put',
+        key: index + '!' + index.split('').map(k => fact[k]).join('!'),
+        value: 0
+      })
+    })
+    return ops
+  } catch (e) {
+    throw e
+  }
 }
 
 function validateAndEncodeFactTuple (fb, factTuple) {
@@ -74,96 +68,83 @@ function validateAndEncodeFactTuples (fb, factTuples) {
   return factTuples.map(tuple => validateAndEncodeFactTuple(fb, tuple))
 }
 
-function validateAndEncodeFactTuplesToDBOps (fb, txn, factTuples, callback) {
+async function validateAndEncodeFactTuplesToDBOps (fb, txn, factTuples) {
   try {
     factTuples = validateAndEncodeFactTuples(fb, factTuples)
-  } catch (err) {
-    return callback(err)
+    const opsPerFact = await Promise.all(
+      factTuples.map(tuple => tupleToDBOps(fb, txn, tuple))
+    )
+    return _.flatten(opsPerFact)
+  } catch (e) {
+    throw e
   }
-
-  contra.map(
-    factTuples,
-    (tuple, callback) => {
-      tupleToDBOps(fb, txn, tuple, callback)
-    },
-    (err, opsPerFact) => {
-      callback(err, _.flatten(opsPerFact))
-    }
-  )
 }
 
-function factTuplesToSchemaChanges (conn, txn, factTuples, callback) {
-  const attrIds = _.pluck(
-    factTuples.filter(fact => fact[1] === '_db/attribute'),
-    0
-  )
-
-  if (attrIds.length === 0) {
-    return callback(null, {})
+async function factTuplesToSchemaChanges (conn, txn, factTuples) {
+  try {
+    const attrIds = _.pluck(
+      factTuples.filter(fact => fact[1] === '_db/attribute'),
+      0
+    )
+    if (attrIds.length === 0) {
+      return {}
+    }
+    return conn.loadSchemaFromIds(txn, attrIds)
+  } catch (e) {
+    throw e
   }
-  conn.loadSchemaFromIds(txn, attrIds, callback)
 }
 
-export default function (db, options, onStartup) {
-  if (arguments.length === 2) {
-    onStartup = options
-    options = {}
-  }
-  options = options || {}
-  const hindex = options.hindex || HashIndex(db)
+async function worker (conn, data) {
+  try {
+    const factTuples = data[0]
+    const txData = data[1]
+    const fb = conn.snap()
+    const txn = fb.txn + 1
 
-  Connection(db, { hindex }, (err, conn) => {
-    if (err) {
-      return onStartup(err)
+    // store facts about the transaction
+    txData['_db/txn-time'] = new Date()
+    for (const k of Object.keys(txData)) {
+      const val = txData[k]
+      factTuples.push(['_txid' + txn, k, val])
     }
 
-    const q = AsyncQ((data, callback) => {
-      const factTuples = data[0]
-      const txData = data[1]
-
-      const fb = conn.snap()
-      const txn = fb.txn + 1
-
-      // store facts about the transaction
-      txData['_db/txn-time'] = new Date()
-      _.each(txData, (val, attr) => {
-        factTuples.push(['_txid' + txn, attr, val])
-      })
-
-      validateAndEncodeFactTuplesToDBOps(fb, txn, factTuples, (err, ops) => {
-        if (err) {
-          return callback(err)
-        }
-
-        fb.db.batch(ops, err => {
+    const ops = await validateAndEncodeFactTuplesToDBOps(fb, txn, factTuples)
+    return await new Promise((resolve, reject) => {
+      fb.db.batch(ops, async err => {
+        try {
           if (err) {
-            return callback(err)
+            reject(err)
           }
-          factTuplesToSchemaChanges(
+          const schemaChanges = await factTuplesToSchemaChanges(
             conn,
             txn,
-            factTuples,
-            (err, schemaChanges) => {
-              if (err) {
-                return callback(err)
-              }
-              conn.update(txn, schemaChanges)
-              callback(null, conn.snap())
-            }
+            factTuples
           )
-        })
+          conn.update(txn, schemaChanges)
+          resolve(conn.snap())
+        } catch (e) {
+          reject(e)
+        }
       })
     })
+  } catch (e) {
+    throw e
+  }
+}
 
-    onStartup(null, {
+export default async function (db, options = {}) {
+  try {
+    const hindex = options.hindex || HashIndex(db)
+    const conn = await Connection(db, { hindex })
+    const queue = new PQueue({ concurrency: 1 })
+    return {
       connection: conn,
-      transact (factTuples, txData, callback) {
-        if (arguments.length === 2) {
-          callback = txData
-          txData = {}
-        }
-        q.push([factTuples, txData], callback)
+      transact (factTuples, txData = {}) {
+        return queue.add(() => worker(conn, [factTuples, txData]))
       }
-    })
-  })
+    }
+  } catch (e) {
+    throw e
+  }
 }

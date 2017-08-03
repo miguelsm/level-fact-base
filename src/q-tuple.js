@@ -1,9 +1,8 @@
 import _ from 'lodash'
-import contra from 'contra'
 import escapeRegExp from 'escape-regexp'
-import assertFB from './utils/assertFB'
+import assertFB from './utils/assert-fb'
 import * as SchemaUtils from './schema-utils'
-import toPaddedBase36 from './utils/toPaddedBase36'
+import toPaddedBase36 from './utils/to-padded-base36'
 
 function escapeVar (elm) {
   return _.isString(elm)
@@ -27,96 +26,89 @@ function bindToTuple (tuple, binding) {
   return tuple.map(e => (binding.hasOwnProperty(e) ? escapeVar(binding[e]) : e))
 }
 
-function parseElementThroughHIndex (fb, elm, callback) {
-  elm = unEscapeVar(elm)
-  fb.hindex.getHash(elm, (err, hash) => {
-    if (err) {
-      callback(err)
-    } else {
-      callback(null, { hash })
-    }
-  })
-}
-
-function getHashForEachType (fb, elm, callback) {
-  const hashByTypeName = {}
-  contra.each(
-    Object.keys(fb.types),
-    (typeName, next) => {
-      const type = fb.types[typeName]
-      if (!type.validate(elm)) {
-        return next(null) // just ignore it b/c elm must not be of that type
-      }
-      parseElementThroughHIndex(fb, type.encode(elm), (err, o) => {
-        if (err) {
-          return next(err)
-        }
-        hashByTypeName[typeName] = o.hash
-        next(null)
-      })
-    },
-    err => {
-      callback(err, hashByTypeName)
-    }
-  )
-}
-
-function parseElement (fb, tuple, i, callback) {
-  const elm = tuple.length < i + 1 ? '?_' : tuple[i]
-  if (isTheThrowAwayVar(elm)) {
-    callback(null, { isBlank: true })
-  } else if (isVar(elm)) {
-    callback(null, { varName: elm })
-  } else if (i < 2 && _.isString(elm)) {
-    parseElementThroughHIndex(fb, elm, callback)
-  } else if (i === 2) {
-    var type = getTypeForAttribute(fb, tuple[1])
-    if (!type) {
-      getHashForEachType(fb, elm, (err, typeNotYetKnown) => {
-        if (err) {
-          return callback(err)
-        }
-        switch (_.size(typeNotYetKnown)) {
-          case 0:
-            callback(
-              new Error('value in this query tuple is of an unkown type')
-            )
-            break
-          case 1:
-            callback(null, { hash: _.first(_.values(typeNotYetKnown)) })
-            break
-          default:
-            callback(null, { typeNotYetKnown })
-        }
-      })
-    } else {
-      if (type.validate(elm)) {
-        parseElementThroughHIndex(fb, type.encode(elm), callback)
-      } else {
-        callback(new Error('value in tuple has invalid type'))
-      }
-    }
-  } else if (i === 3 && _.isNumber(elm)) {
-    const txn = toPaddedBase36(elm, 6)
-    callback(null, { hash: txn })
-  } else if (i === 4 && (elm === true || elm === false)) {
-    callback(null, { hash: elm })
-  } else {
-    callback(new Error(`element ${i} in tuple has invalid type`))
+async function parseElementThroughHIndex (fb, elm) {
+  try {
+    elm = unEscapeVar(elm)
+    const hash = await fb.hindex.getHash(elm)
+    return { hash }
+  } catch (e) {
+    throw e
   }
 }
 
-function parseTuple (fb, tuple, callback) {
-  contra.concurrent(
-    {
-      e: contra.curry(parseElement, fb, tuple, 0),
-      a: contra.curry(parseElement, fb, tuple, 1),
-      v: contra.curry(parseElement, fb, tuple, 2),
-      t: contra.curry(parseElement, fb, tuple, 3),
-      o: contra.curry(parseElement, fb, tuple, 4)
-    },
-    callback
-  )
+async function getHashForEachType (fb, elm) {
+  try {
+    const hashByTypeName = {}
+    for (const typeName of Object.keys(fb.types)) {
+      const type = fb.types[typeName]
+      if (!type.validate(elm)) {
+        continue // just ignore it b/c elm must not be of that type
+      }
+      const o = await parseElementThroughHIndex(fb, type.encode(elm))
+      hashByTypeName[typeName] = o.hash
+    }
+    return hashByTypeName
+  } catch (e) {
+    throw e
+  }
+}
+
+async function parseElement (fb, tuple, i) {
+  try {
+    const elm = tuple.length < i + 1 ? '?_' : tuple[i]
+    if (isTheThrowAwayVar(elm)) {
+      return { isBlank: true }
+    } else if (isVar(elm)) {
+      return { varName: elm }
+    } else if (i < 2 && _.isString(elm)) {
+      return await parseElementThroughHIndex(fb, elm)
+    } else if (i === 2) {
+      var type = getTypeForAttribute(fb, tuple[1])
+      if (!type) {
+        const typeNotYetKnown = await getHashForEachType(fb, elm)
+        switch (_.size(typeNotYetKnown)) {
+          case 0:
+            throw new Error('value in this query tuple is of an unkown type')
+            break
+          case 1:
+            return { hash: _.first(_.values(typeNotYetKnown)) }
+            break
+          default:
+            return { typeNotYetKnown }
+        }
+      } else {
+        if (type.validate(elm)) {
+          return await parseElementThroughHIndex(fb, type.encode(elm))
+        } else {
+          throw new Error('value in tuple has invalid type')
+        }
+      }
+    } else if (i === 3 && _.isNumber(elm)) {
+      const txn = toPaddedBase36(elm, 6)
+      return { hash: txn }
+    } else if (i === 4 && (elm === true || elm === false)) {
+      return { hash: elm }
+    } else {
+      throw new Error(`element ${i} in tuple has invalid type`)
+    }
+  } catch (e) {
+    throw e
+  }
+}
+
+async function parseTuple (fb, tuple) {
+  try {
+    const [e, a, v, t, o] = await Promise.all([
+      parseElement(fb, tuple, 0),
+      parseElement(fb, tuple, 1),
+      parseElement(fb, tuple, 2),
+      parseElement(fb, tuple, 3),
+      parseElement(fb, tuple, 4)
+    ])
+    return { e, a, v, t, o }
+  } catch (e) {
+    throw e
+  }
 }
 
 const selectIndex = (function () {
@@ -216,27 +208,29 @@ function parseKey (key) {
   return hashFact
 }
 
-function forEachMatchingHashFact (fb, matcher, iterator, done) {
-  fb.db
-    .createReadStream({
-      keys: true,
-      values: false,
-      gte: matcher.prefix + '\x00',
-      lte: matcher.prefix + '\xFF'
-    })
-    .on('data', key => {
-      const hashFact = matcher.getHashFactIfKeyMatches(fb, key)
-      if (!hashFact) {
-        return // just ignore and keep going
-      }
-      iterator(hashFact)
-    })
-    .on('error', err => {
-      done(err)
-    })
-    .on('end', () => {
-      done(null)
-    })
+function forEachMatchingHashFact (fb, matcher, iterator) {
+  return new Promise((resolve, reject) => {
+    fb.db
+      .createReadStream({
+        keys: true,
+        values: false,
+        gte: matcher.prefix + '\x00',
+        lte: matcher.prefix + '\xFF'
+      })
+      .on('data', key => {
+        const hashFact = matcher.getHashFactIfKeyMatches(fb, key)
+        if (!hashFact) {
+          return // just ignore and keep going
+        }
+        iterator(hashFact)
+      })
+      .on('error', err => {
+        reject(err)
+      })
+      .on('end', () => {
+        resolve()
+      })
+  })
 }
 
 function isHashMultiValued (fb, h) {
@@ -340,60 +334,48 @@ function SetOfBindings (fb, qFact) {
   }
 }
 
-export default function (fb, tuple, orig_binding, callback) {
-  if (arguments.length === 3) {
-    callback = orig_binding
-    orig_binding = {}
-  }
-
+export default async function (fb, tuple, origBinding = {}) {
   try {
     assertFB(fb)
-  } catch (e) {
-    return callback(e)
-  }
 
-  if (!_.isArray(tuple)) {
-    return callback(new Error('tuple must be an array'))
-  }
+    if (!_.isArray(tuple)) {
+      throw new Error('tuple must be an array')
+    }
 
-  if (!_.isPlainObject(orig_binding)) {
-    return callback(new Error('binding must be a plain object'))
-  }
+    if (!_.isPlainObject(origBinding)) {
+      throw new Error('binding must be a plain object')
+    }
 
-  parseTuple(fb, bindToTuple(tuple, orig_binding), (err, qFact) => {
-    if (err) {
-      if (err.notFound) {
+    let qFact
+
+    try {
+      qFact = await parseTuple(fb, bindToTuple(tuple, origBinding))
+    } catch (e) {
+      if (e.notFound) {
         // one of the tuple values were not found in the hash, so there must be no results
-        return callback(null, [])
+        return []
       }
-      return callback(err)
+      throw e
     }
 
     const indexToUse = selectIndex(qFact)
-    const isAttributeUnknown = qFact.a.hasOwnProperty('varName')
 
     const s = SetOfBindings(fb, qFact)
-
-    forEachMatchingHashFact(
+    await forEachMatchingHashFact(
       fb,
       toMatcher(indexToUse, qFact),
       hashFact => {
         s.add(hashFact)
-      },
-      err => {
-        if (err) {
-          return callback(err)
-        }
-
-        const hashBindings = s.toArray()
-
-        // de-hash the bindings
-        contra.map(
-          hashBindings,
-          (binding, callback) => {
-            contra.map(
-              _.pairs(binding),
-              (p, callback) => {
+      }
+    )
+    const hashBindings = s.toArray()
+    // de-hash the bindings
+    const results = await Promise.all(
+      hashBindings.map(async binding => {
+        try {
+          const pairs = await Promise.all(
+            _.pairs(binding).map(async p => {
+              try {
                 let [varName, varValue] = p
                 let decode = _.identity
 
@@ -403,21 +385,24 @@ export default function (fb, tuple, orig_binding, callback) {
                 }
 
                 if (_.isString(varValue)) {
-                  fb.hindex.get(varValue, (err, val) => {
-                    callback(err, [varName, decode(val)])
-                  })
+                  const val = await fb.hindex.get(varValue)
+                  return [varName, decode(val)]
                 } else {
-                  callback(null, [varName, varValue])
+                  return [varName, varValue]
                 }
-              },
-              (err, pairs) => {
-                callback(err, _.assign({}, orig_binding, _.object(pairs)))
+              } catch (e) {
+                throw e
               }
-            )
-          },
-          callback
-        )
-      }
+            })
+          )
+          return { ...origBinding, ..._.object(pairs) }
+        } catch (e) {
+          throw e
+        }
+      })
     )
-  })
+    return results
+  } catch (e) {
+    throw e
+  }
 }

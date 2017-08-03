@@ -1,6 +1,6 @@
 require('babel-register')
+require('babel-polyfill')
 require('./transactor.test')
 require('./connection.test')
 require('./q.test')
-require('./qTuple.test')
-require('./getEntity.test')
+require('./get-entity.test')

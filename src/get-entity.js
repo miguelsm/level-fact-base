@@ -1,6 +1,6 @@
 import _ from 'lodash'
 import q from './q'
-import assertFB from './utils/assertFB'
+import assertFB from './utils/assert-fb'
 import * as SchemaUtils from './schema-utils'
 
 function isMultiValued (fb, a) {
@@ -11,22 +11,15 @@ function isMultiValued (fb, a) {
   }
 }
 
-export default function (fb, e, callback) {
+export default async function (fb, e) {
   try {
     assertFB(fb)
-  } catch (e) {
-    return callback(e)
-  }
-
-  q(fb, [['?e', '?a', '?v']], [{ '?e': e }], (err, results) => {
-    if (err) {
-      return callback(err)
-    }
+    const results = await q(fb, [['?e', '?a', '?v']], [{ '?e': e }])
     if (results.length === 0) {
-      return callback(null, null)
+      return null
     }
     const o = {}
-    results.forEach(result => {
+    for (const result of results) {
       const a = result['?a']
       if (isMultiValued(fb, a)) {
         if (!_.isArray(o[a])) {
@@ -36,7 +29,9 @@ export default function (fb, e, callback) {
       } else {
         o[a] = result['?v']
       }
-    })
-    callback(null, o)
-  })
+    }
+    return o
+  } catch (e) {
+    throw e
+  }
 }

@@ -1,280 +1,177 @@
 import _ from 'lodash'
-import contra from 'contra'
 import test from 'tape'
 import level from 'levelup'
 import memdown from 'memdown'
-import HashIndex from 'level-hash-index'
 import q from '../src/q'
 import Transactor from '../src/transactor'
-import genRandomString from '../src/utils/genRandomString'
 
-test('ensure schema is loaded on transactor startup', t => {
-  const db = level(memdown)
-
-  Transactor(db, {}, (err, transactor1) => {
-    if (err) {
-      return t.end(err)
+test('ensure schema is loaded on transactor startup', async t => {
+  try {
+    const db = level(memdown)
+    const transactor1 = await Transactor(db)
+    try {
+      await transactor1.transact([['sky', 'color', 'blue']])
+    } catch (e) {
+      t.ok(e)
+      t.equals(e.toString(), 'Error: Attribute not found: color')
     }
-    transactor1.transact([['sky', 'color', 'blue']], {}, err => {
-      t.ok(err)
-      t.equals(err.toString(), 'Error: Attribute not found: color')
-
-      transactor1.transact(
-        [['01', '_db/attribute', 'color'], ['01', '_db/type', 'String']],
-        {},
-        err => {
-          if (err) {
-            return t.end(err)
-          }
-          Transactor(db, {}, (err, transactor2) => {
-            if (err) {
-              return t.end(err)
-            }
-            transactor2.transact([['sky', 'color', 'blue']], {}, err => {
-              t.end(err)
-            })
-          })
-        }
-      )
-    })
-  })
+    await transactor1.transact([
+      ['01', '_db/attribute', 'color'],
+      ['01', '_db/type', 'String']
+    ])
+    const transactor2 = await Transactor(db)
+    await transactor2.transact([['sky', 'color', 'blue']])
+    t.end()
+  } catch (e) {
+    t.end(e)
+  }
 })
 
-test('ensure schema is updated as facts are recorded', t => {
-  const db = level(memdown)
-
-  Transactor(db, {}, (err, transactor) => {
-    if (err) {
-      return t.end(err)
+test('ensure schema is updated as facts are recorded', async t => {
+  try {
+    const db = level(memdown)
+    const transactor = await Transactor(db)
+    try {
+      await transactor.transact([['sky', 'color', 'blue']])
+    } catch (e) {
+      t.ok(e)
+      t.equals(e.toString(), 'Error: Attribute not found: color')
     }
-
-    transactor.transact([['sky', 'color', 'blue']], {}, err => {
-      t.ok(err)
-      t.equals(err.toString(), 'Error: Attribute not found: color')
-
-      transactor.transact(
-        [['01', '_db/attribute', 'color'], ['01', '_db/type', 'String']],
-        {},
-        err => {
-          if (err) {
-            return t.end(err)
-          }
-          transactor.transact([['sky', 'color', 'blue']], {}, err => {
-            t.end(err)
-          })
-        }
-      )
-    })
-  })
+    await transactor.transact([
+      ['01', '_db/attribute', 'color'],
+      ['01', '_db/type', 'String']
+    ])
+    await transactor.transact([['sky', 'color', 'blue']])
+    t.end()
+  } catch (e) {
+    t.end(e)
+  }
 })
 
-test('ensure transact persists stuff to the db', t => {
-  const db = level(memdown)
-
-  Transactor(db, {}, (err, transactor) => {
-    if (err) {
-      return t.end(err)
-    }
-    contra.series(
+test('ensure transact persists stuff to the db', async t => {
+  try {
+    const db = level(memdown)
+    const transactor = await Transactor(db)
+    await transactor.transact([
+      ['01', '_db/attribute', 'name'],
+      ['01', '_db/type', 'String'],
+      ['02', '_db/attribute', 'age'],
+      ['02', '_db/type', 'Integer'],
+      ['03', '_db/attribute', 'user_id'],
+      ['03', '_db/type', 'Entity_ID']
+    ])
+    await transactor.transact(
       [
-        contra.curry(
-          transactor.transact,
-          [
-            ['01', '_db/attribute', 'name'],
-            ['01', '_db/type', 'String'],
-            ['02', '_db/attribute', 'age'],
-            ['02', '_db/type', 'Integer'],
-            ['03', '_db/attribute', 'user_id'],
-            ['03', '_db/type', 'Entity_ID']
-          ],
-          {}
-        ),
-        contra.curry(
-          transactor.transact,
-          [
-            ['0001', 'name', 'bob'],
-            ['0001', 'age', 34],
-            ['0002', 'name', 'jim'],
-            ['0002', 'age', 23]
-          ],
-          { user_id: '0001' }
-        )
+        ['0001', 'name', 'bob'],
+        ['0001', 'age', 34],
+        ['0002', 'name', 'jim'],
+        ['0002', 'age', 23]
       ],
-      err => {
-        if (err) {
-          return t.end(err)
-        }
-        const all_data = []
-        db
-          .readStream()
-          .on('data', data => {
-            all_data.push(data)
-          })
-          .on('close', () => {
-            t.equals(all_data.length, 74)
-            t.end()
-          })
+      {
+        user_id: '0001'
       }
     )
-  })
-})
-
-test('ensure transactor warms up with the latest transaction id', t => {
-  const db = level(memdown)
-
-  Transactor(db, {}, (err, transactor) => {
-    if (err) {
-      return t.end(err)
-    }
-    contra.series(
-      [
-        contra.curry(
-          transactor.transact,
-          [['01', '_db/attribute', 'is'], ['01', '_db/type', 'String']],
-          {}
-        ),
-        contra.curry(transactor.transact, [['bob', 'is', 'cool']], {}),
-        contra.curry(transactor.transact, [['bob', 'is', 'NOT cool']], {}),
-        contra.curry(transactor.transact, [['bob', 'is', 'cool']], {})
-      ],
-      err => {
-        if (err) {
-          return t.end(err)
-        }
-        const fb = transactor.connection.snap()
-        q(fb, [['?_', '?_', '?_', '?txn']], [{}], (err, results) => {
-          if (err) {
-            return t.end(err)
-          }
-          const txns = _.unique(_.pluck(results, '?txn')).sort()
-          t.deepEqual(txns, [1, 2, 3, 4])
-
-          //warm up a new transactor to see where it picks up
-          Transactor(db, {}, (err, transactor2) => {
-            if (err) {
-              return t.end(err)
-            }
-            transactor2.transact(
-              [['bob', 'is', 'NOT cool']],
-              {},
-              (err, fb2) => {
-                if (err) {
-                  return t.end(err)
-                }
-                q(fb2, [['?_', '?_', '?_', '?txn']], [{}], (err, results) => {
-                  const txns = _.unique(_.pluck(results, '?txn')).sort()
-                  t.deepEqual(txns, [1, 2, 3, 4, 5])
-                  t.end(err)
-                })
-              }
-            )
-          })
-        })
-      }
-    )
-  })
-})
-
-test('transactions must be done serially, in the order they are recieved', t => {
-  const db = level(memdown)
-  Transactor(db, {}, (err, transactor) => {
-    if (err) {
-      return t.end(err)
-    }
-    function transact_attr (attr_name) {
-      return function (callback) {
-        transactor.transact(
-          [['01', '_db/attribute', attr_name], ['01', '_db/type', 'String']],
-          {},
-          (err, fb) => {
-            callback(null, err ? 'fail' : fb.txn)
-          }
-        )
-      }
-    }
-    contra.concurrent(
-      [
-        transact_attr('works'),
-        transact_attr(111), //fails
-        transact_attr('also works')
-      ],
-      (err, results) => {
-        if (err) {
-          return t.end(err)
-        }
-        t.deepEquals(results, [1, 'fail', 2])
+    const allData = []
+    db
+      .readStream()
+      .on('data', data => {
+        allData.push(data)
+      })
+      .on('close', () => {
+        t.equals(allData.length, 74)
         t.end()
-      }
-    )
-  })
+      })
+  } catch (e) {
+    t.end(e)
+  }
 })
 
-function setUpRetractTest (multiValued, callback) {
-  const db = level(memdown)
-  Transactor(db, {}, (err, transactor) => {
-    if (err) {
-      return callback(err)
+test('ensure transactor warms up with the latest transaction id', async t => {
+  try {
+    const db = level(memdown)
+    const transactor = await Transactor(db)
+    await transactor.transact([
+      ['01', '_db/attribute', 'is'],
+      ['01', '_db/type', 'String']
+    ])
+    await transactor.transact([['bob', 'is', 'cool']])
+    await transactor.transact([['bob', 'is', 'NOT cool']])
+    await transactor.transact([['bob', 'is', 'cool']])
+    const fb = transactor.connection.snap()
+    const results1 = await q(fb, [['?_', '?_', '?_', '?txn']])
+    const txns1 = _.unique(_.pluck(results1, '?txn')).sort()
+    t.deepEqual(txns1, [1, 2, 3, 4])
+    // warm up a new transactor to see where it picks up
+    const transactor2 = await Transactor(db)
+    const fb2 = await transactor2.transact([['bob', 'is', 'NOT cool']])
+    const results2 = await q(fb2, [['?_', '?_', '?_', '?txn']])
+    const txns2 = _.unique(_.pluck(results2, '?txn')).sort()
+    t.deepEqual(txns2, [1, 2, 3, 4, 5])
+    t.end()
+  } catch (e) {
+    t.end(e)
+  }
+})
+
+test('transactions must be done serially, in the order they are recieved', async t => {
+  try {
+    const db = level(memdown)
+    const transactor = await Transactor(db)
+
+    function transactAttr (attr) {
+      return transactor
+        .transact([['01', '_db/attribute', attr], ['01', '_db/type', 'String']])
+        .then(fb => fb.txn)
+        .catch(() => 'fail')
     }
-    contra.series(
-      [
-        contra.curry(
-          transactor.transact,
-          [
-            ['1', '_db/attribute', 'email'],
-            ['1', '_db/type', 'String'],
-            ['1', '_db/is-multi-valued', multiValued]
-          ],
-          {}
-        ),
-        contra.curry(transactor.transact, [['bob', 'email', 'email@1']], {}),
-        contra.curry(transactor.transact, [['bob', 'email', 'email@2']], {}),
-        contra.curry(
-          transactor.transact,
-          [['bob', 'email', 'email@2', false]],
-          {}
-        ),
-        contra.curry(transactor.transact, [['bob', 'email', 'email@3']], {}),
-        contra.curry(transactor.transact, [['bob', 'email', 'email@2']], {}),
-        contra.curry(
-          transactor.transact,
-          [['bob', 'email', 'email@1', false]],
-          {}
-        ),
-        contra.curry(
-          transactor.transact,
-          [['bob', 'email', 'email@2', false]],
-          {}
-        ),
-        contra.curry(
-          transactor.transact,
-          [['bob', 'email', 'email@3', false]],
-          {}
-        )
-      ],
-      (err, fbs) => {
-        if (err) {
-          return callback(err)
-        }
-        contra.map.series(
-          fbs,
-          (fb, callback) => {
-            q(fb, [['bob', 'email', '?email']], [{}], (err, results) => {
-              callback(err, _.pluck(results, '?email').sort())
-            })
-          },
-          callback
-        )
-      }
-    )
-  })
+
+    const results = await Promise.all([
+      transactAttr('works'),
+      transactAttr(111), //fails
+      transactAttr('also works')
+    ])
+    t.deepEquals(results, [1, 'fail', 2])
+    t.end()
+  } catch (e) {
+    t.end(e)
+  }
+})
+
+async function setUpRetractTest (multiValued) {
+  try {
+    const db = level(memdown)
+    const transactor = await Transactor(db)
+    const fbs = [
+      await transactor.transact([
+        ['1', '_db/attribute', 'email'],
+        ['1', '_db/type', 'String'],
+        ['1', '_db/is-multi-valued', multiValued]
+      ]),
+      await transactor.transact([['bob', 'email', 'email@1']]),
+      await transactor.transact([['bob', 'email', 'email@2']]),
+      await transactor.transact([['bob', 'email', 'email@2', false]]),
+      await transactor.transact([['bob', 'email', 'email@3']]),
+      await transactor.transact([['bob', 'email', 'email@2']]),
+      await transactor.transact([['bob', 'email', 'email@1', false]]),
+      await transactor.transact([['bob', 'email', 'email@2', false]]),
+      await transactor.transact([['bob', 'email', 'email@3', false]])
+    ]
+    const results = []
+    for (const fb of fbs) {
+      results.push(
+        _.pluck(await q(fb, [['bob', 'email', '?email']]), '?email').sort()
+      )
+    }
+    return results
+  } catch (e) {
+    throw e
+  }
 }
 
-test('retracting facts', t => {
-  setUpRetractTest(false, (err, emails_over_time) => {
-    if (err) {
-      return t.end(err)
-    }
-    t.deepEquals(emails_over_time, [
+test('retracting facts', async t => {
+  try {
+    const emailsOverTime = await setUpRetractTest(false)
+    t.deepEquals(emailsOverTime, [
       [],
       ['email@1'],
       ['email@2'],
@@ -286,15 +183,15 @@ test('retracting facts', t => {
       []
     ])
     t.end()
-  })
+  } catch (e) {
+    t.end(e)
+  }
 })
 
-test('retracting multi-valued facts', t => {
-  setUpRetractTest(true, (err, emails_over_time) => {
-    if (err) {
-      return t.end(err)
-    }
-    t.deepEquals(emails_over_time, [
+test('retracting multi-valued facts', async t => {
+  try {
+    const emailsOverTime = await setUpRetractTest(true)
+    t.deepEquals(emailsOverTime, [
       [],
       ['email@1'],
       ['email@1', 'email@2'],
@@ -306,5 +203,7 @@ test('retracting multi-valued facts', t => {
       []
     ])
     t.end()
-  })
+  } catch (e) {
+    t.end(e)
+  }
 })

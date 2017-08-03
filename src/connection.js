@@ -1,154 +1,119 @@
 import _ from 'lodash'
-import contra from 'contra'
 import HashIndex from 'level-hash-index'
 import q from './q'
 import constants from './constants'
-import getEntity from './getEntity'
+import getEntity from './get-entity'
 
-function getLatestedTxn (db, callback) {
-  const stream = db
-    .createReadStream({
-      keys: true,
-      values: false,
-      reverse: true,
-      gte: 'teavo!\x00',
-      lte: 'teavo!\xFF'
-    })
-    .on('data', data => {
-      const txn = parseInt(data.split('!')[1], 36)
-      callback(null, txn)
-      stream.destroy()
-    })
-    .on('error', err => {
-      callback(err)
-    })
-    .on('end', () => {
-      callback(null, 0)
-    })
+function getLatestTxn (db) {
+  return new Promise((resolve, reject) => {
+    const stream = db
+      .createReadStream({
+        keys: true,
+        values: false,
+        reverse: true,
+        gte: 'teavo!\x00',
+        lte: 'teavo!\xFF'
+      })
+      .on('data', data => {
+        resolve(parseInt(data.split('!')[1], 36))
+        stream.destroy()
+      })
+      .on('error', err => {
+        reject(err)
+      })
+      .on('end', () => {
+        resolve(0)
+      })
+  })
 }
 
-function buildSchemaFromEntities (hindex, entities, callback) {
-  const schema = {}
-  schema['_db/attribute-hashes'] = {}
-
-  contra.each(
-    entities,
-    (entity, done) => {
+async function buildSchemaFromEntities (hindex, entities) {
+  try {
+    const schema = {}
+    schema['_db/attribute-hashes'] = {}
+    for (const entity of entities) {
       const a = entity['_db/attribute']
       schema[a] = _.cloneDeep(entity)
-
-      hindex.put(a, (err, h) => {
-        if (err) {
-          return done(err)
-        }
-        schema[a]['_db/attribute-hash'] = h.hash
-        schema['_db/attribute-hashes'][h.hash] = a
-        done(null)
-      })
-    },
-    err => {
-      if (err) {
-        return callback(err)
-      }
-      callback(null, schema)
+      const h = await hindex.put(a)
+      schema[a]['_db/attribute-hash'] = h.hash
+      schema['_db/attribute-hashes'][h.hash] = a
     }
-  )
+    return schema
+  } catch (e) {
+    throw e
+  }
 }
 
-function loadSchemaFromIds (fb, ids, callback) {
-  contra.map(
-    ids,
-    (id, callback) => {
-      getEntity(fb, id, callback)
-    },
-    (err, entities) => {
-      if (err) {
-        return callback(err)
-      }
-      buildSchemaFromEntities(fb.hindex, entities, callback)
-    }
-  )
+async function loadSchemaFromIds (fb, ids) {
+  try {
+    const entities = await Promise.all(ids.map(id => getEntity(fb, id)))
+    return await buildSchemaFromEntities(fb.hindex, entities)
+  } catch (e) {
+    throw e
+  }
 }
 
-function loadUserSchema (fb, callback) {
-  q(fb, [['?attr_id', '_db/attribute']], [{}], (err, results) => {
-    if (err) {
-      return callback(err)
-    }
-    loadSchemaFromIds(
+async function loadUserSchema (fb) {
+  try {
+    const results = await q(fb, [['?attr_id', '_db/attribute']], [{}])
+    return await loadSchemaFromIds(
       fb,
-      results.map(result => {
-        return result['?attr_id']
-      }),
-      callback
+      results.map(result => result['?attr_id'])
     )
-  })
+  } catch (e) {
+    throw e
+  }
 }
 
-export default function (db, options, callback) {
-  if (arguments.length === 2) {
-    callback = options
-    options = {}
+function makeFB (db, hindex, txn, schema) {
+  return {
+    db,
+    hindex,
+    schema,
+    txn,
+    types: constants.dbTypes
   }
+}
 
-  options = options || {}
-  const hindex = options.hindex || HashIndex(db)
+async function loadSchemaAsOf (db, hindex, baseSchema, txn) {
+  try {
+    const userSchema = await loadUserSchema(makeFB(db, hindex, txn, baseSchema))
+    return { ...userSchema, ...baseSchema }
+  } catch (e) {
+    throw e
+  }
+}
 
-  function makeFB (txn, schema) {
+export default async function (db, options) {
+  try {
+    options = options || {}
+    const hindex = options.hindex || HashIndex(db)
+    const _makeFB = makeFB.bind(null, db, hindex)
+    const baseSchema = await buildSchemaFromEntities(hindex, constants.dbSchema)
+    const _loadSchemaAsOf = loadSchemaAsOf.bind(null, db, hindex, baseSchema)
+    let latestTxn = await getLatestTxn(db)
+    let latestSchema = await _loadSchemaAsOf(latestTxn)
     return {
-      db,
-      hindex,
-      schema,
-      txn,
-      types: constants.dbTypes
-    }
-  }
-
-  buildSchemaFromEntities(hindex, constants.dbSchema, (err, base_schema) => {
-    if (err) {
-      return callback(err)
-    }
-
-    function loadSchemaAsOf (txn, callback) {
-      loadUserSchema(makeFB(txn, base_schema), (err, user_schema) => {
-        if (err) {
-          return callback(err)
+      update (new_txn, schema_changes) {
+        latestTxn = new_txn
+        latestSchema = _.assign({}, latestSchema, schema_changes)
+      },
+      snap () {
+        return _makeFB(latestTxn, latestSchema)
+      },
+      async asOf (txn) {
+        try {
+          const schema = await _loadSchemaAsOf(txn)
+          return _makeFB(txn, schema)
+        } catch (e) {
+          throw e
         }
-        callback(null, _.assign({}, user_schema, base_schema))
-      })
-    }
-
-    getLatestedTxn(db, (err, latest_transaction_n) => {
-      if (err) {
-        return callback(err)
+      },
+      loadSchemaFromIds (txn, ids) {
+        return loadSchemaFromIds(_makeFB(txn, baseSchema), ids)
       }
-
-      loadSchemaAsOf(latest_transaction_n, (err, latest_schema) => {
-        if (err) {
-          return callback(err)
-        }
-
-        callback(null, {
-          update (new_txn, schema_changes) {
-            latest_transaction_n = new_txn
-            latest_schema = _.assign({}, latest_schema, schema_changes)
-          },
-          snap () {
-            return makeFB(latest_transaction_n, latest_schema)
-          },
-          asOf (txn, callback) {
-            loadSchemaAsOf(txn, (err, schema) => {
-              if (err) {
-                return callback(err)
-              }
-              callback(null, makeFB(txn, schema))
-            })
-          },
-          loadSchemaFromIds (txn, ids, callback) {
-            loadSchemaFromIds(makeFB(txn, base_schema), ids, callback)
-          }
-        })
-      })
-    })
-  })
+    }
+  } catch (e) {
+    throw e
+  }
 }
