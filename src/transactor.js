@@ -4,7 +4,51 @@ import HashIndex from 'level-hash-index'
 import Connection from './connection'
 import constants from './constants'
 import * as SchemaUtils from './schema-utils'
+import q from './q'
 import toPaddedBase36 from './utils/to-padded-base36'
+
+const TXN_LENGTH = 6
+
+function isMultiValued (fb, a) {
+  try {
+    return SchemaUtils.isAttributeMultiValued(fb, a)
+  } catch (e) {
+    return false
+  }
+}
+
+function getFactTxn (fb, { e, a, v }) {
+  const key = `eavto!${e}!${a}!${v}!`
+  return new Promise((resolve, reject) => {
+    fb.db
+      .createKeyStream({
+        gte: key + '\x00',
+        lte: key + '\xff'
+      })
+      .on('data', data => {
+        resolve(data.substr(key.length, TXN_LENGTH))
+      })
+      .on('error', err => {
+        reject(err)
+      })
+      .on('end', () => {
+        resolve(null)
+      })
+  })
+}
+
+function getDbOps (type, fact) {
+  const ops = []
+  constants.indexNames.forEach(index => {
+    const op = {
+      type,
+      key: index + '!' + index.split('').map(k => fact[k]).join('!'),
+      value: 0
+    }
+    ops.push(op)
+  })
+  return ops
+}
 
 async function tupleToDBOps (fb, txn, tuple) {
   try {
@@ -12,7 +56,7 @@ async function tupleToDBOps (fb, txn, tuple) {
     const hashDatas = await Promise.all([e, a, v].map(fb.hindex.put))
     const ops = []
     const fact = {
-      t: toPaddedBase36(txn, 6), // for lexo-graphic sorting
+      t: toPaddedBase36(txn, TXN_LENGTH), // for lexo-graphic sorting
       o: tuple[3]
     }
     'eav'.split('').forEach((k, i) => {
@@ -21,14 +65,25 @@ async function tupleToDBOps (fb, txn, tuple) {
         ops.push({ type: 'put', key: hashDatas[i].key, value: tuple[i] })
       }
     })
-    constants.indexNames.forEach(index => {
-      ops.push({
-        type: 'put',
-        key: index + '!' + index.split('').map(k => fact[k]).join('!'),
-        value: 0
-      })
-    })
-    return ops
+    const existingFact = { ...fact, o: 1, t: await getFactTxn(fb, fact) }
+    const exists = existingFact.t !== null
+    if (!exists && !isMultiValued(fb, a)) {
+      const prevV = await q(fb, [[e, a, '?v']])
+      if (prevV.length > 0) {
+        const prevVHash = await fb.hindex.put(prevV[0]['?v'])
+        const prevFact = { ...fact, v: prevVHash.hash }
+        ops.push(
+          getDbOps('del', { ...prevFact, t: await getFactTxn(fb, prevFact) })
+        )
+      }
+    }
+    if (exists && !fact.o) {
+      ops.push(getDbOps('del', existingFact))
+    }
+    if (!exists && fact.o) {
+      ops.push(getDbOps('put', fact))
+    }
+    return _.flatten(ops)
   } catch (e) {
     throw e
   }
@@ -78,7 +133,7 @@ async function validateAndEncodeFactTuplesToDBOps (fb, txn, factTuples) {
     const opsPerFact = await Promise.all(
       factTuples.map(tuple => tupleToDBOps(fb, txn, tuple))
     )
-    return _.flatten(opsPerFact)
+    return _.flatten(opsPerFact).filter(t => t)
   } catch (e) {
     throw e
   }
@@ -109,10 +164,8 @@ async function worker (conn, data) {
     const txn = fb.txn + 1
 
     // store facts about the transaction
-    txData['_db/txn-time'] = new Date()
     for (const k of Object.keys(txData)) {
-      const val = txData[k]
-      factTuples.push(['_txid' + txn, k, val])
+      factTuples.push([`_txid${txn}`, k, txData[k]])
     }
 
     const ops = await validateAndEncodeFactTuplesToDBOps(fb, txn, factTuples)
