@@ -78,7 +78,7 @@ function makeFB (db, hindex, txn, schema) {
 async function loadSchemaAsOf (db, hindex, baseSchema, txn) {
   try {
     const userSchema = await loadUserSchema(makeFB(db, hindex, txn, baseSchema))
-    return { ...userSchema, ...baseSchema }
+    return _.merge({}, userSchema, baseSchema)
   } catch (e) {
     throw e
   }
@@ -94,9 +94,9 @@ export default async function (db, options) {
     let latestTxn = await getLatestTxn(db)
     let latestSchema = await _loadSchemaAsOf(latestTxn)
     return {
-      update (new_txn, schema_changes) {
-        latestTxn = new_txn
-        latestSchema = _.assign({}, latestSchema, schema_changes)
+      update (newTxn, schemaChanges) {
+        latestTxn = newTxn
+        latestSchema = _.merge({}, latestSchema, schemaChanges)
       },
       snap () {
         return _makeFB(latestTxn, latestSchema)
