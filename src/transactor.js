@@ -36,7 +36,11 @@ async function tupleToDBOps (fb, txn, tuple) {
 
 function validateAndEncodeFactTuple (fb, factTuple) {
   // eavo
-  if (!_.isArray(factTuple) || factTuple.length < 3 || factTuple.length > 4) {
+  if (
+    !Array.isArray(factTuple) ||
+    factTuple.length < 3 ||
+    factTuple.length > 4
+  ) {
     throw new Error('factTuple must be an array defining EAV or EAVO')
   }
 
@@ -82,10 +86,12 @@ async function validateAndEncodeFactTuplesToDBOps (fb, txn, factTuples) {
 
 async function factTuplesToSchemaChanges (conn, txn, factTuples) {
   try {
-    const attrIds = _.pluck(
-      factTuples.filter(fact => fact[1] === '_db/attribute'),
-      0
-    )
+    const attrIds = factTuples.reduce((acc, fact) => {
+      if (fact[1] === '_db/attribute') {
+        acc.push(fact[0])
+      }
+      return acc
+    }, [])
     if (attrIds.length === 0) {
       return {}
     }
